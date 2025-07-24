@@ -1,0 +1,17 @@
+# סביבות וירטואליות
+venv/
+
+# קבצי מערכת ו־IDE
+.idea/
+__pycache__/
+
+# קבצי Excel
+*.xlsx
+~$*
+
+# ריפוזיטוריז מוטמעים
+tree-sitter-c/
+tree-sitter-cpp/
+
+# תיקיות בנייה
+build/
