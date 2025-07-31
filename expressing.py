@@ -6,6 +6,33 @@ parser = Parser()
 parser.set_language(C_LANGUAGE)
 
 
+def wrap(expr: str) -> str:
+    expr = expr.strip()
+
+    # אם כבר יש סוגריים מסביב לכל הביטוי - נוריד אותן
+    while expr.startswith("(") and expr.endswith(")"):
+        # נבדוק אם הסוגריים באמת עוטפות את כל הביטוי
+        depth = 0
+        is_outer = True
+        for i, ch in enumerate(expr):
+            if ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+                if depth == 0 and i != len(expr) - 1:
+                    is_outer = False
+                    break
+        if is_outer:
+            expr = expr[1:-1].strip()
+        else:
+            break
+
+    # לא נוסיף סוגריים אם זה ביטוי פשוט
+    if any(op in expr for op in [' ', '+', '-', '*', '/', '<', '>', '=', ',', 'AND', 'OR']):
+        return expr
+    return expr
+
+
 class CToExcelConverter:
     def __init__(self):
         self.parser = parser
@@ -70,25 +97,37 @@ class CToExcelConverter:
             "second": "SECOND",
             "text": "TEXT",
         }
+        self.variables = {}
+
 
     def convert(self, c_code: str) -> str:
         tree = self.parser.parse(bytes(c_code, "utf8"))
         root = tree.root_node
         func_node = root.children[0]
         body = func_node.child_by_field_name("body")
-        code = c_code
+        self.code = c_code
 
+        tree = self.parser.parse(bytes(self.code, "utf8"))
+        root_node = tree.root_node
+        print(root_node.sexp())
         # נבנה רשימה של if-statements וה-return שבסוף
+        # נבנה רשימה של כל ה־statements לפי הסדר האמיתי
         statements = []
         for child in body.named_children:
-            if child.type == 'if_statement':
-                statements.append(child)
-            elif child.type == 'return_statement':
+            if child.type in ('if_statement', 'return_statement', 'declaration', 'expression_statement'):
                 statements.append(child)
 
-        formula = self.build_nested_if(statements, code)
+        formula = self.build_nested_if(statements,self.code)
+
+        if self.variables:
+            let_parts = [f'{k}, {v}' for k, v in self.variables.items()]
+            bindings = ', '.join(let_parts)
+            formula = f'LET({bindings}, {formula})'
+
         self.excel_formula = formula
+        print("Assignments collected:", self.variables)
         return formula
+
 
     def convert_expression(self, node, code):
         kind = node.type
@@ -102,17 +141,17 @@ class CToExcelConverter:
 
             # ניהול אופרטורים לוגיים והשוואות
             if op == '==':
-                return f"({left} = {right})"
+                return wrap(f"{left} = {right}")
             elif op == '!=':
-                return f"({left} <> {right})"
+                return wrap(f"{left} <> {right}")
             elif op == '&&':
-                return f"AND({left}, {right})"
+                return wrap(f"AND{left}, {right}")
             elif op == '||':
                 conditions = self.flatten_or_conditions(node, code)
                 return self.build_or_expression(conditions)
 
             else:
-                return f"({left} {op} {right})"
+                return wrap(f"{left} {op} {right}")
 
 
         elif kind == 'call_expression':
@@ -127,6 +166,22 @@ class CToExcelConverter:
             for arg in args_node.named_children:
                 args.append(self.convert_expression(arg, code))
             return f"{excel_func_name}({', '.join(args)})"
+
+
+        elif kind == 'assignment_expression':
+
+            left = children[0]
+
+            right = children[2]
+
+            var_name = code[left.start_byte:left.end_byte]
+
+            value_formula = self.convert_expression(right, code)
+
+            self.handle_assignment(var_name, value_formula)
+
+            return ''  # לא מחזירים כלום כאן - משתנה נשמר
+
 
 
         elif kind == 'field_expression':
@@ -146,7 +201,7 @@ class CToExcelConverter:
             return code[node.start_byte:node.end_byte]
 
         elif kind == 'parenthesized_expression':
-            return f"({self.convert_expression(children[1], code)})"
+            return wrap(f"{self.convert_expression(children[1], code)}")
 
         elif kind == 'return_statement':
             return self.convert_expression(children[1], code)
@@ -166,95 +221,231 @@ class CToExcelConverter:
             else:
                 return f"{operator}({operand})"
 
+        elif kind == 'subscript_expression':
+            # דוגמה: life->free_inv_prop_t[inv_year]
+            array_node = children[0]
+            index_node = children[2]
+
+            # אם זה access דרך ->
+            if array_node.type == 'field_expression':
+                left = self.convert_expression(array_node.children[0], code)  # life
+                right = code[array_node.children[2].start_byte:array_node.children[2].end_byte]  # free_inv_prop_t
+                array_ref = f"{left}!{right}"
+            else:
+                # גישה רגילה למערך
+                array_ref = self.convert_expression(array_node, code)
+
+            index_ref = self.convert_expression(index_node, code)
+
+            # באקסל צריך אינדקס החל מ-1, ב־C הוא מ-0
+            return f"INDEX({array_ref}, {index_ref} + 1)"
+
         return code[node.start_byte:node.end_byte]
 
-    def convert_if_statement(self, node, code):
-        condition = self.convert_expression(node.child_by_field_name('condition'), code)
-        if_true = node.child_by_field_name('consequence')
-        if_false = node.child_by_field_name('alternative')
+    def convert_if_statement(self, node):
+        condition_node = node.child_by_field_name("condition")
+        consequence_node = node.child_by_field_name("consequence")
+        alternative_node = node.child_by_field_name("alternative")
 
-        # קבל את הערך של ה-if_true
-        true_result = self.extract_return_value(if_true, code)
-        if true_result == '""':
-            assign = self.find_assignment_in_node(if_true)
-            if assign:
-                true_result = self.convert_expression(assign.children[1], code)
+        condition = self.convert_expression(condition_node, self.code)
 
-        # קבל את הערך של ה-if_false
-        false_result = self.extract_return_value(if_false, code) if if_false else '""'
-        if false_result == '""' and if_false:
-            assign = self.find_assignment_in_node(if_false)
+        def convert_block(block_node):
+            expressions = []
+            if block_node.type == "compound_statement":
+                for child in block_node.children:
+                    if child.type in ["{", "}"]:
+                        continue
+                    expr = self.convert_statement(child)
+                    if expr:
+                        expressions.append(expr)
+            else:
+                expr = self.convert_statement(block_node)
+                if expr:
+                    expressions.append(expr)
+            return ", ".join(expressions) if expressions else ""
 
-            if assign:
-                false_result = self.convert_expression(assign.children[1], code)
+        consequence = convert_block(consequence_node)
+        alternative = convert_block(alternative_node) if alternative_node else None
 
-        return f'IF(({condition}), {true_result}, {false_result})'
+        if alternative:
+            return f"IF({condition}, {consequence}, {alternative})"
+        else:
+            return f"IF({condition}, {consequence})"
+
+    def convert_statement(self, node):
+        if node.type == "if_statement":
+            result = self.convert_if_statement(node)
+
+            # 🔹 טיפול ב־alternative (else) כדי לעדכן השמות
+            alternative_node = node.child_by_field_name("alternative")
+            if alternative_node:
+                self.extract_assignments(alternative_node, self.code)
+
+            return result
+
+        elif node.type == "return_statement":
+            return self.extract_return_value(node, self.code)
+
+        elif node.type == "expression_statement":
+            expr_node = node.child_by_field_name("expression")
+            if expr_node is not None:
+                if expr_node.type == "assignment_expression":
+                    self.convert_expression(expr_node, self.code)
+                    return ""  # משתנה נשמר, אין נוסחה להחזיר
+                else:
+                    return self.convert_expression(expr_node, self.code)
+
+        elif node.type == "assignment_expression":
+            self.convert_expression(node, self.code)
+            return ""
+
+        elif node.type == "compound_statement":
+            results = []
+            for child in node.named_children:
+                result = self.convert_statement(child)
+                if result:
+                    results.append(result)
+            return ", ".join(results)
+
+
+
+        elif node.type == 'declaration':
+
+            declarator = node.child_by_field_name("declarator")
+
+            value_node = node.child_by_field_name("value")
+
+            # טיפול במבנה init_declarator אם יש
+
+            if declarator and declarator.type == "init_declarator":
+
+                var_id = declarator.child_by_field_name("declarator")
+
+                value_node = declarator.child_by_field_name("value")
+
+                if var_id and value_node:
+                    var_name = self.get_expression_text(var_id, self.code)
+
+                    value = self.convert_expression(value_node, self.code)
+
+                    self.handle_assignment(var_name, value)
+
+                return
+
+            # טיפול רגיל בהצהרה עם ערך
+
+            if declarator and value_node:
+                var_name = self.get_expression_text(declarator, self.code)
+
+                # כאן חשוב מאוד לשלוח את כל value_node ל-convert_expression
+
+                value = self.convert_expression(value_node, self.code)
+
+                self.handle_assignment(var_name, value)
+
+            # טיפול רגיל
+
+
+
+        else:
+            # כל דבר אחר – ננסה לטפל כביטוי
+            return self.convert_expression(node, self.code)
+
+
 
     def build_nested_if(self, statements, code):
-        """
-        מקבל רשימת תנאים ויוצר נוסחת IF מקוננת אחת.
-        """
         default_result = '""'
 
-        # עוברים אחורה כדי לבנות קינון פנימי -> חיצוני
         for node in reversed(statements):
             if node.type == 'return_statement':
                 default_result = self.convert_expression(node, code)
+
             elif node.type == 'if_statement':
                 condition = self.convert_expression(node.child_by_field_name('condition'), code)
-                if_true = self.extract_return_value(node.child_by_field_name('consequence'), code)
 
-                # יש גם else עם return?
-                if node.child_by_field_name('alternative') is not None:
-                    if_false = self.extract_return_value(node.child_by_field_name('alternative'), code)
+                # --- True branch ---
+                consequence = node.child_by_field_name('consequence')
+                vars_before_true = dict(self.variables)
+                self.extract_assignments(consequence, code)
+                if_true = self.extract_return_value(consequence, code) or default_result
+                new_vars_true = [f"{k}, {v}" for k, v in self.variables.items() if k not in vars_before_true]
+                if new_vars_true:
+                    bindings_true = ', '.join(new_vars_true)
+                    if_true = f"LET({bindings_true}, {default_result})"
+
+                # --- False branch ---
+                alternative = node.child_by_field_name('alternative')
+                vars_before_false = dict(self.variables)
+                if alternative:
+                    self.extract_assignments(alternative, code)
+                    if_false = self.extract_return_value(alternative, code) or default_result
+                    new_vars_false = [f"{k}, {v}" for k, v in self.variables.items() if k not in vars_before_false]
+                    if new_vars_false:
+                        bindings_false = ', '.join(new_vars_false)
+                        if_false = f"LET({bindings_false}, {default_result})"
                 else:
                     if_false = default_result
 
                 default_result = f'IF(({condition}), {if_true}, {if_false})'
 
+            elif node.type == 'expression_statement' and len(node.children) > 0:
+                inner = node.children[0]
+                if inner.type == 'assignment_expression':
+                    self.convert_expression(inner, code)
+
+            elif node.type == 'declaration':
+                self.extract_assignments(node, code)
+
+            elif node.type == 'compound_statement':
+                self.extract_assignments(node, code)
+
         return default_result
+
+    def handle_assignment(self, name, value):
+        print(f"Handling assignment: {name} = {value}")
+        self.variables[name] = value
+        return None  # לא מחזיר מיידית נוסחה אלא מחכה לבניית LET בסוף
 
     def extract_return_value(self, node, code):
         if node.type == 'return_statement':
             if node.child_count > 1:
                 expr_node = node.children[1]
-                return self.get_expression_text(expr_node, code)
+                value_text = self.get_expression_text(expr_node, code)
+
+                if value_text in self.variables:
+                    if self.variables[value_text] == "" or self.variables[value_text] is None:
+                        return self.convert_expression(expr_node, code)
+                    return self.variables[value_text]
+                else:
+                    return self.convert_expression(expr_node, code)
+
+
             else:
                 return ""
 
-        elif node.type == 'compound_statement':  # מתאר בלוק פקודות
+        elif node.type == 'compound_statement':
             for child in node.children:
                 if child.type == 'return_statement':
                     return self.extract_return_value(child, code)
                 elif child.type == 'if_statement':
-                    nested_result = self.convert_if_statement(child, code)
+                    nested_result = self.convert_if_statement(child)
                     if nested_result:
                         return nested_result
                 elif child.type == 'expression_statement':
-                    # אם זה ביטוי השמה נשלוף רק את צד ימין
                     if len(child.children) > 0 and child.children[0].type == 'assignment_expression':
-                        assign_expr = self.convert_expression(child.children[0].children[2], code)
-                        if assign_expr:
-                            return assign_expr
-
+                        self.convert_expression(child.children[0], code)
+                        return ''
             return ""
 
-
-
         elif node.type == 'else_clause':
-
             for child in node.children:
-
-                if child.type == 'return_statement' or child.type == 'compound_statement':
+                if child.type in ('return_statement', 'compound_statement'):
                     return self.extract_return_value(child, code)
-
-
                 elif child.type == 'if_statement':
                     nested_result = self.convert_if_statement(child, code)
                     if nested_result:
                         return nested_result
                 elif child.type == 'expression_statement':
-                    # אם זה ביטוי השמה נשלוף רק את צד ימין
                     if len(child.children) > 0 and child.children[0].type == 'assignment_expression':
                         assign_expr = self.convert_expression(child.children[0].children[2], code)
                         if assign_expr:
@@ -278,6 +469,8 @@ class CToExcelConverter:
                 print(f"Field: {name}, Type: {child.type}, Text: {code[child.start_byte:child.end_byte]}")
 
     def get_expression_text(self, node, code):
+        if node.type == "identifier":
+            return code[node.start_byte:node.end_byte]
         return code[node.start_byte:node.end_byte]
 
     def build_or_expression(self, conditions: list[str]) -> str:
@@ -286,7 +479,6 @@ class CToExcelConverter:
         if len(conditions) == 1:
             return conditions[0]
         return f'OR({", ".join(conditions)})'
-
     def flatten_or_conditions(self, node, code):
         """
         מקבלת עץ של תנאי '||' ומחזירה רשימת ביטויים שטוחים.
@@ -308,9 +500,14 @@ class CToExcelConverter:
         if node is None:
             return None
 
-        # אם זו השמה - מחזירים מיד
+        # אם זו השמה - מחזירים את שם המשתנה ואת הצומת
         if node.type == 'assignment_expression':
-            return node
+            left_node = node.child_by_field_name('left')
+            if left_node is not None and left_node.type == 'identifier':
+                var_name = left_node.text.decode('utf-8')
+                return (var_name, node)
+            else:
+                return (None, node)  # למקרה חריג שאין left ברור
 
         # אם זו שורת קוד שמכילה השמה
         if node.type == 'expression_statement':
@@ -326,6 +523,13 @@ class CToExcelConverter:
                 if result:
                     return result
 
+        if node.type == "declaration":
+            declarator = node.child_by_field_name("declarator")
+            value_node = node.child_by_field_name("value")
+            if declarator and value_node:
+                var_name = self.get_expression_text(declarator,self.code)
+                return var_name, value_node
+
         # אם זו else או if או כל דבר אחר – נכנסים רקורסיבית
         for child in node.children:
             result = self.find_assignment_in_node(child)
@@ -334,6 +538,37 @@ class CToExcelConverter:
 
         return None
 
+    def extract_assignments(self, block_node, code):
+        if block_node.type == 'compound_statement':
+            for child in block_node.children:
+                self.extract_assignments(child, code)  # רקורסיה פנימה
+
+        elif block_node.type == 'expression_statement' and len(block_node.children) > 0:
+            inner = block_node.children[0]
+            if inner.type == 'assignment_expression':
+                self.convert_expression(inner, code)
+
+
+        elif block_node.type == 'declaration':
+            declarator = block_node.child_by_field_name("declarator")
+            value_node = block_node.child_by_field_name("value")
+
+            if declarator and declarator.type == "init_declarator":
+                var_id = declarator.child_by_field_name("declarator")
+                value_node = declarator.child_by_field_name("value")
+                if var_id and value_node:
+                    var_name = self.get_expression_text(var_id, code)
+                    value = self.convert_expression(value_node, code)
+                    self.handle_assignment(var_name, value)
+                return
+
+            if declarator and value_node:
+                var_name = self.get_expression_text(declarator, code)
+                value = self.convert_expression(value_node, code)
+                self.handle_assignment(var_name, value)
+
+
+
 
 # ====================
 # 🧪 Example Usage:
@@ -341,15 +576,21 @@ class CToExcelConverter:
 if __name__ == "__main__":
     c_code = """
 double calc() {
-   if (t <= commence_period_w || t >  maturity_period_ann)
+  if (t < commence_period_w || t > maturity_period_ann)
  return 0.0;
  if (annuity_pmt_curr_tot == 0)
  return 0.0;
- return - pmt_total(t) - expense_ren_perc_post_ret(t);
- 
- }
+ int proj_yr = xint(life->proj_year(t+1));
+ if(eq(life->projection_type_int, "Rollup"))
+ proj_yr = xint(life->proj_year_rollup(t+1));
+ if (t >= maturity_period_w)
+ return claims_annuity_nogt_pv(t+1) * life->ann_v_month_t[proj_yr]
+ + pmt_total_nogt(t+1);
+ return 0.0;
     """
 
     converter = CToExcelConverter()
     excel_formula = converter.convert(c_code)
     print("Excel Formula:", excel_formula)
+
+
