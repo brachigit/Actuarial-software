@@ -119,10 +119,6 @@ class CToExcelConverter:
 
         formula = self.build_nested_if(statements,self.code)
 
-        if self.variables:
-            let_parts = [f'{k}, {v}' for k, v in self.variables.items()]
-            bindings = ', '.join(let_parts)
-            formula = f'LET({bindings}, {formula})'
 
         self.excel_formula = formula
         print("Assignments collected:", self.variables)
@@ -353,54 +349,6 @@ class CToExcelConverter:
 
 
 
-    def build_nested_if(self, statements, code):
-        default_result = '""'
-
-        for node in reversed(statements):
-            if node.type == 'return_statement':
-                default_result = self.convert_expression(node, code)
-
-            elif node.type == 'if_statement':
-                condition = self.convert_expression(node.child_by_field_name('condition'), code)
-
-                # --- True branch ---
-                consequence = node.child_by_field_name('consequence')
-                vars_before_true = dict(self.variables)
-                self.extract_assignments(consequence, code)
-                if_true = self.extract_return_value(consequence, code) or default_result
-                new_vars_true = [f"{k}, {v}" for k, v in self.variables.items() if k not in vars_before_true]
-                if new_vars_true:
-                    bindings_true = ', '.join(new_vars_true)
-                    if_true = f"LET({bindings_true}, {default_result})"
-
-                # --- False branch ---
-                alternative = node.child_by_field_name('alternative')
-                vars_before_false = dict(self.variables)
-                if alternative:
-                    self.extract_assignments(alternative, code)
-                    if_false = self.extract_return_value(alternative, code) or default_result
-                    new_vars_false = [f"{k}, {v}" for k, v in self.variables.items() if k not in vars_before_false]
-                    if new_vars_false:
-                        bindings_false = ', '.join(new_vars_false)
-                        if_false = f"LET({bindings_false}, {default_result})"
-                else:
-                    if_false = default_result
-
-                default_result = f'IF(({condition}), {if_true}, {if_false})'
-
-            elif node.type == 'expression_statement' and len(node.children) > 0:
-                inner = node.children[0]
-                if inner.type == 'assignment_expression':
-                    self.convert_expression(inner, code)
-
-            elif node.type == 'declaration':
-                self.extract_assignments(node, code)
-
-            elif node.type == 'compound_statement':
-                self.extract_assignments(node, code)
-
-        return default_result
-
     def handle_assignment(self, name, value):
         print(f"Handling assignment: {name} = {value}")
         self.variables[name] = value
@@ -412,12 +360,8 @@ class CToExcelConverter:
                 expr_node = node.children[1]
                 value_text = self.get_expression_text(expr_node, code)
 
-                if value_text in self.variables:
-                    if self.variables[value_text] == "" or self.variables[value_text] is None:
-                        return self.convert_expression(expr_node, code)
-                    return self.variables[value_text]
-                else:
-                    return self.convert_expression(expr_node, code)
+                return self.convert_expression(expr_node, code)
+
 
 
             else:
@@ -472,6 +416,76 @@ class CToExcelConverter:
         if node.type == "identifier":
             return code[node.start_byte:node.end_byte]
         return code[node.start_byte:node.end_byte]
+
+    def extract_statements(self, block_node):
+        stmts = []
+        if block_node.type == 'compound_statement':
+            for child in block_node.named_children:
+                if child.type in ('if_statement', 'return_statement', 'declaration', 'expression_statement'):
+                    stmts.append(child)
+        else:
+            stmts.append(block_node)
+        return stmts
+
+    def update_variables_with_condition(self, condition, vars_before, vars_after_true, vars_after_false):
+        for var in set(vars_after_true.keys()) | set(vars_after_false.keys()):
+            val_true = vars_after_true.get(var, vars_before.get(var, '""'))
+            val_false = vars_after_false.get(var, vars_before.get(var, '""'))
+            self.variables[var] = f"IF({condition}, {val_true}, {val_false})"
+
+    def build_nested_if(self, statements, code):
+        default_result = '""'
+
+        for node in reversed(statements):
+            if node.type == 'return_statement':
+                default_result = self.convert_expression(node, code)
+
+            elif node.type == 'if_statement':
+                condition = self.convert_expression(node.child_by_field_name('condition'), code)
+
+                # מצב משתנים לפני ה־if
+                vars_before = dict(self.variables)
+
+                # --- TRUE branch ---
+                consequence_statements = self.extract_statements(node.child_by_field_name('consequence'))
+                self.variables = dict(vars_before)  # שחזור לפני בנייה
+                if_true = self.build_nested_if(consequence_statements, code)
+                vars_after_true = dict(self.variables)
+
+                # --- FALSE branch ---
+                alternative_node = node.child_by_field_name('alternative')
+                if alternative_node:
+                    false_statements = self.extract_statements(alternative_node)
+                    self.variables = dict(vars_before)  # שחזור לפני בנייה
+                    if_false = self.build_nested_if(false_statements, code)
+                    vars_after_false = dict(self.variables)
+                else:
+                    if_false = default_result
+                    vars_after_false = dict(vars_before)
+
+                # עדכון משתנים עם התנאי
+                self.update_variables_with_condition(condition, vars_before, vars_after_true, vars_after_false)
+
+                # עדכון תוצאת ברירת המחדל
+                default_result = f"IF({condition}, {if_true}, {if_false})"
+
+            elif node.type == 'expression_statement' and len(node.children) > 0:
+                inner = node.children[0]
+                if inner.type == 'assignment_expression':
+                    self.convert_expression(inner, code)
+
+            elif node.type == 'declaration':
+                self.extract_assignments(node, code)
+
+            elif node.type == 'compound_statement':
+                self.extract_assignments(node, code)
+
+        # ✅ LET יחיד בסוף
+        if self.variables:
+            bindings = ', '.join(f'{k}, {v}' for k, v in self.variables.items())
+            return f'LET({bindings}, {default_result})'
+        else:
+            return default_result
 
     def build_or_expression(self, conditions: list[str]) -> str:
         if not conditions:
@@ -576,17 +590,13 @@ class CToExcelConverter:
 if __name__ == "__main__":
     c_code = """
 double calc() {
-  if (t < commence_period_w || t > maturity_period_ann)
+if (M16 <= 20 || M16 >  40)
  return 0.0;
- if (annuity_pmt_curr_tot == 0)
- return 0.0;
- int proj_yr = xint(life->proj_year(t+1));
- if(eq(life->projection_type_int, "Rollup"))
- proj_yr = xint(life->proj_year_rollup(t+1));
- if (t >= maturity_period_w)
- return claims_annuity_nogt_pv(t+1) * life->ann_v_month_t[proj_yr]
- + pmt_total_nogt(t+1);
- return 0.0;
+ if (tot == 0)
+ return tot;
+ return - total(2) - ret(2)
+}
+
     """
 
     converter = CToExcelConverter()
