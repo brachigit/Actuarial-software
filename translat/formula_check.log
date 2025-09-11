@@ -1,0 +1,5 @@
+2025-08-31 13:29:34,468 - INFO - Formula "IF(OR(t <= commence_period_w, t > maturity_period_ann), 0.0, IF(annuity_pmt_curr_tot = 0, 0.0, -(pmt_total(t)) - expense_ren_perc_post_ret(t)))" is valid
+2025-08-31 13:29:54,104 - ERROR - Formula '=IF(H1 >, "Yes", "No")' is invalid. Exception type: com_error, details: (-2147352567, 'Exception occurred.', (0, None, None, None, 0, -2146827284), None)
+2025-08-31 13:33:21,285 - ERROR - Formula '=IF(H1 >, "Yes", "No")' is invalid. Exception type: com_error, Error code: -2147352567, Description: Unknown error, Details: (-2147352567, 'Exception occurred.', (0, None, None, None, 0, -2146827284), None)
+2025-08-31 13:36:07,881 - ERROR - Formula '=IF(H1 >, "Yes", "No")' is invalid. Exception type: com_error, Error code: -2146827284, Description: Syntax error in the formula, Details: (-2147352567, 'Exception occurred.', (0, None, None, None, 0, -2146827284), None)
+2025-08-31 14:15:20,894 - ERROR - Formula '=IF(H1 >, "Yes", "No")' is invalid. Exception type: com_error, Error code: -2146827284, Description: Syntax error in the formula, Details: (-2147352567, 'Exception occurred.', (0, None, None, None, 0, -2146827284), None)
