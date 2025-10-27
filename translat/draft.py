@@ -25,6 +25,6 @@ def print_pdf_page(pdf_path, page_number):
 
 
 # דוגמה לקריאה לפונקציה
-print_pdf_page("C:\\Users\\user\\Downloads\\AuditReport With Lookups.pdf", 26)
+print_pdf_page("C:\\Users\\user\\Downloads\\AuditReport With Lookups.pdf", 1416)
 
 
