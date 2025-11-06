@@ -157,208 +157,8 @@ def search_variable_Associated_Code_in_pdf(pdf_path, variable_name):
 
     print(f"Variable '{variable_name}' not found in the PDF.")
     return None
-def classify_lookup_tables(tables):
-    row_table = None
-    col_table = None
-
-    for table in tables:
-        if not table or not isinstance(table, list) or not table[0]:
-            continue
-
-        header_text = " ".join(table[0]).lower()
-        sample_text = " ".join([" ".join(r) for r in table[:2]]).lower()
-
-        # 🔍 ננסה לזהות לפי מילים אופייניות
-        if "row" in header_text or "row lookup" in sample_text:
-            row_table = table
-        elif "col" in header_text or "column lookup" in sample_text:
-            col_table = table
-
-    # אם עדיין לא זוהו, ננסה לפי סוג הנתונים:
-    if not row_table and not col_table and len(tables) == 2:
-        # נניח שהשנייה היא Row
-        col_table, row_table = tables
-
-    return row_table, col_table
 
 
-
-def process_lookup_logic(pdf_path, excel_input_path, excel_output_path, description_value, tables):
-    """
-    🧩 פונקציה זו מממשת את לוגיקת העבודה המלאה על פי האפיון.
-    היא משלבת בין טבלאות ה-Row וה-Column שנשלפו מה-PDF,
-    ומבצעת חיפוש, השוואות, ושליפת ערכים מקבצי האקסל.
-    """
-
-    # ---------------------------------------------------------
-    # שלב 1 – פתיחת הלשונית המתאימה לפי description_value
-    # ---------------------------------------------------------
-    print(f"📘 Opening sheet '{description_value}' in Excel file: {excel_input_path}")
-    xl = pd.ExcelFile(excel_input_path)
-    if description_value not in xl.sheet_names:
-        print(f"❌ Sheet '{description_value}' not found in {excel_input_path}")
-        return None
-
-    df_input = xl.parse(description_value)
-    print(f"✅ Loaded sheet with {len(df_input)} rows and {len(df_input.columns)} columns")
-
-    # ---------------------------------------------------------
-    # שלב 2 – זיהוי טבלאות Row ו-Column
-    # ---------------------------------------------------------
-    row_table, column_table = None, None
-    for t in tables:
-        header = [h.lower() for h in t[0]]
-        if any("row" in h for h in header):
-            row_table = pd.DataFrame(t[1:], columns=t[0])
-        elif any("column" in h for h in header):
-            column_table = pd.DataFrame(t[1:], columns=t[0])
-
-    print("\n🔍 Debug: Checking extracted lookup tables:")
-    for idx, tbl in enumerate(tables, start=1):
-        if not tbl:
-            continue
-        header = tbl[0]
-        print(f"Table {idx} header: {header[:5]} ...")
-
-    # כאן בד"כ נעשית הסיווג של הטבלאות:
-    row_table, col_table = classify_lookup_tables(tables)
-
-    if column_table is None or row_table is None:
-        print("❌ Missing Row or Column table.")
-        return None
-
-    # ---------------------------------------------------------
-    # שלב 3 – קריאת טבלת Column (עמודה אחת בלבד)
-    # ---------------------------------------------------------
-    print("🔹 Processing Column table")
-    col_lookup_term = column_table.loc[0, "Lookup term"]
-    col_target_column = column_table.loc[0, "Column"]
-
-    print(f"   Lookup term: {col_lookup_term}")
-    print(f"   Target column in Excel: {col_target_column}")
-
-    # ---------------------------------------------------------
-    # שלב 4 – ריצה על טבלת Row כדי למצוא שורה מתאימה באקסל
-    # ---------------------------------------------------------
-    print("🔹 Processing Row table")
-    row_terms = row_table["Lookup term"].tolist()
-
-    matched_row_idx = None
-    start_col_idx = 0  # נתחיל מהעמודה הראשונה
-
-    for idx in range(len(df_input)):  # מעבר על שורות באקסל
-        match = True
-        current_col_idx = start_col_idx  # בכל שורה נתחיל מהעמודה הנוכחית
-        for term in row_terms:
-            try:
-                resolved_term = resolve_lookup_term(pdf_path, excel_output_path, term)
-            except Exception as e:
-                print(f"⚠️ Failed to resolve term '{term}': {e}")
-                resolved_term = None
-
-            # אם לא הצליח – דילוג לשורה הבאה בטבלת row וגם לעמודה הבאה באקסל
-            if not resolved_term or resolved_term == "":
-                print(f"➡️ Skipping row term '{term}' — unresolved value.")
-                match = False
-                start_col_idx += 1  # התקדמות לעמודה הבאה
-                break
-
-            if current_col_idx >= len(df_input.columns):
-                match = False
-                break
-
-            cell_value = str(df_input.iloc[idx, current_col_idx]).strip()
-            if str(cell_value).strip() != str(resolved_term).strip():
-                match = False
-                break
-            current_col_idx += 1  # התקדמות לעמודה הבאה
-
-        if match:
-            matched_row_idx = idx
-            print(f"✅ Found matching row at index {idx}")
-            break
-
-    if matched_row_idx is None:
-        print("⚠️ No matching row found in Excel.")
-        return None
-
-    # ---------------------------------------------------------
-    # שלב 5 – שליפת הערך מהעמודה שהתקבלה מטבלת Column
-    # ---------------------------------------------------------
-    if col_target_column not in df_input.columns:
-        print(f"❌ Target column '{col_target_column}' not found in Excel sheet.")
-        return None
-
-    final_value = df_input.loc[matched_row_idx, col_target_column]
-    print(f"🎯 Final extracted value: {final_value}")
-    return final_value
-
-
-# ---------------------------------------------------------
-# פונקציה פנימית – פירוש הערך שבעמודת Lookup term
-# ---------------------------------------------------------
-def resolve_lookup_term(pdf_path, excel_output_path, term):
-    """
-    מבצעת פירוש של הערכים בעמודת Lookup term בהתאם לסוגם:
-    Constant, Code Scalar, Input Variable וכו'.
-    """
-    term = str(term).strip()
-
-    # 1️⃣ Constant: <*code_variable*>
-    if term.startswith("Constant: <") and ">" in term:
-        variable_name = re.search(r"<(.*?)>", term).group(1)
-        print(f"🔍 Constant variable detected: {variable_name}")
-        return variable_name
-
-    # 2️⃣ Constant: "some text"
-    elif term.startswith('Constant: "'):
-        match = re.search(r'Constant:\s*"(.*?)"', term)
-        if match:
-            text_value = match.group(1)
-            print(f"🔍 Constant text detected: {text_value}")
-            return text_value
-
-    # 3️⃣ Code Scalar: <variable> : <model>
-    elif term.startswith("Code Scalar:"):
-        match = re.search(r"<(.*?)>\s*:\s*<(.*?)>", term)
-        if match:
-            var_name, model_name = match.groups()
-            print(f"🔍 Code Scalar detected → var={var_name}, model={model_name}")
-            sheet_name = f"{model_name}_cflow_Scalars"
-            try:
-                df = pd.read_excel(excel_output_path, sheet_name=sheet_name)
-                if var_name in df.columns:
-                    value = df[var_name].iloc[0]
-                    print(f"   Value from {sheet_name}.{var_name}: {value}")
-                    return value
-            except Exception as e:
-                print(f"⚠️ Failed to load sheet {sheet_name}: {e}")
-
-    # 4️⃣ Input Variable: <namemodel>_Data: input variable
-    elif term.startswith("Input Variable:"):
-        match = re.search(r"Input Variable:\s*<(.*?)>_Data: input variable", term)
-        if match:
-            model_name = match.group(1)
-            print(f"🔍 Input Variable detected: model={model_name}")
-
-            variable_name = f"{model_name}_Data"
-            X = search_variable_Associated_Code_in_pdf(pdf_path, variable_name)
-            if not X:
-                return None
-
-            sheet_name = f"{model_name}_Data"
-            try:
-                df = pd.read_excel(excel_output_path, sheet_name=sheet_name)
-                found_row = df[df.iloc[:, 0] == X]
-                if not found_row.empty and "value" in df.columns:
-                    value = found_row["value"].iloc[0]
-                    print(f"   Found value for {X}: {value}")
-                    return value
-            except Exception as e:
-                print(f"⚠️ Failed to read sheet {sheet_name}: {e}")
-
-    # ברירת מחדל – החזר כמו שהוא
-    return term
 
 def find_anchor_with_fitz(pdf_path, variable_name, start_page=1):
     """מחפש את שם המשתנה החל מעמוד נתון ומחזיר את ה־bbox ואת מספר העמוד"""
@@ -681,6 +481,8 @@ def Search_variable_Lookup_Settings(pdf_path, variable_Lookup_Settings, variable
 
         print(f"Extracting tables from page {page_num + 1} up to {end_page + 1}...")
 
+
+
         # שלב 3: חילוץ טבלה מהאזור שסביב המשתנה
         print("Step 3: Extracting tables near the anchor...")
         table_data = extract_lookup_sections(pdf_path, page_num, end_page, bbox, next_bbox)
@@ -702,17 +504,6 @@ def Search_variable_Lookup_Settings(pdf_path, variable_Lookup_Settings, variable
 
         description_value = extract_description_same_line(pdf_path, start_page=page_num + 1)
         print(f"📘 Description found: {description_value}")
-
-        excel_input_path = r"C:\Users\user\Downloads\Main assumptions - variable - blank.xlsx"
-        excel_output_path = r"C:\Users\user\Downloads\output (1).xlsx"
-        result_value = process_lookup_logic(
-            pdf_path,
-            excel_input_path,
-            excel_output_path,
-            description_value,
-            table_data
-        )
-        print(result_value)
 
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
@@ -741,6 +532,7 @@ def main():
     if files:
         pdf_path = os.path.join(base_path, files[0])  # בצורה הזו שם הקובץ אינדוודואל
         search_variable_Input_Manager_in_pdf(pdf_path, "takeup_age")
+        print(search_variable_Associated_Code_in_pdf(pdf_path,"age_exact_issue"))
 
 
 if __name__ == "__main__":
