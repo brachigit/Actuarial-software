@@ -169,8 +169,12 @@ def classify_lookup_tables(tables):
         if not table or not isinstance(table, list) or not table[0]:
             continue
 
-        header_text = " ".join(table[0]).lower()
-        sample_text = " ".join([" ".join(r) for r in table[:2]]).lower()
+        header_text = " ".join((cell[0] if isinstance(cell, list) else str(cell)) for cell in table[0]).lower()
+        sample_text = " ".join([
+            " ".join(
+                cell if isinstance(cell, str) else " ".join(cell) if isinstance(cell, list) else str(cell)
+                for cell in r)
+            for r in table[:2] ]).lower()
 
         # 🔍 ננסה לזהות לפי מילים אופייניות
         if "row" in header_text or "row lookup" in sample_text:
@@ -210,7 +214,7 @@ def process_lookup_logic(pdf_path, excel_input_path, excel_output_path, descript
     # ---------------------------------------------------------
     row_table, column_table = None, None
     for t in tables:
-        header = [h.lower() for h in t[0]]
+        header = [(h[0] if isinstance(h, list) else h).lower() for h in t[0]]
         if any("row" in h for h in header):
             row_table = pd.DataFrame(t[1:], columns=t[0])
         elif any("column" in h for h in header):
@@ -396,7 +400,7 @@ def find_next_variable_anchor(pdf_path, variable_name, start_page=1, current_bbo
     doc = fitz.open(pdf_path)
     current_y = current_bbox.y0 if current_bbox else 0
 
-    for page_num in range(start_page - 1, len(doc)):
+    for page_num in range(start_page-1, len(doc)):
         page = doc[page_num]
 
         # חיפוש מדויק לפי שם המשתנה
@@ -462,11 +466,6 @@ def extract_tables_from_bbox(
 
     found_row_marker = False  # האם כבר ראינו את המילה Row
     found_column_marker = False  # האם כבר ראינו את המילה Column
-    previous_page_had_table = False  # האם בעמוד הקודם נמצאה טבלה
-
-    # בטיחות: אם end_page קטן מ-start_page - נתקן
-    if end_page < start_page:
-        end_page = start_page
 
     with pdfplumber.open(pdf_path) as pdf:
         n_pages = len(pdf.pages)
@@ -474,9 +473,6 @@ def extract_tables_from_bbox(
         start_page = max(0, min(start_page, n_pages - 1))
         end_page = max(0, min(end_page, n_pages - 1))
 
-        bboxColumn, page_Column = find_next_variable_anchor(pdf_path, "Column Lookup Details:", start_page, bbox)
-        bboxRow, page_Row = find_next_variable_anchor(pdf_path, " Row Lookup Details:", page_Column, bboxColumn)
-        print(f"📘 📘📘📘📘  page_Row    {page_Row + 1} – page_Column {page_Column+1} start_page {start_page+1}")
 
         for page_num in range(start_page, end_page + 1):
             page = pdf.pages[page_num]
@@ -493,11 +489,12 @@ def extract_tables_from_bbox(
                 found_row_marker = True
                 print(f"📗 Found 'Row' on page {page_num + 1} – starting Row table")
 
+            """
             # ❌ אם כבר הופיעה בעבר אחת מהמילים — לא נמשיך לחלץ טבלאות
-            elif found_column_marker or found_row_marker:
+           elif found_column_marker or found_row_marker:
                 print(f"⏭️ Skipping page {page_num + 1} – tables ignored after first 'Column'/'Row'")
                 continue
-
+                """
             if start_page == end_page:
                 # 💡 עמוד יחיד – חתוך בין המשתנה הנוכחי לזה שאחריו
                 x0, y0, x1, y1 = bbox
@@ -616,21 +613,31 @@ def extract_lookup_sections(pdf_path, start_page, end_page, main_bbox, next_bbox
     'Row Lookup Details' → המשתנה הבא או סוף הקובץ.
     """
     # 1️⃣ מצא את מיקום העוגנים
-
-
+    bboxRow, page_Row = find_next_variable_anchor(pdf_path, "Row Lookup Details:", start_page + 1,main_bbox)
+    print(f"📘📘 page_Column_index={page_Row}, start_page_index={start_page}")
+    print(f"📘📘 page_Column_display={page_Row + 1}, start_page_display={start_page + 1}")
 
     # 2️⃣ חילוץ שתי טבלאות לפי גבולות העוגנים
     print(f"Extracting Column Lookup Details section...start_page{start_page+1} end_page,{ end_page+1}")
-    tables = extract_tables_from_bbox(
+    table_Column = extract_tables_from_bbox(
         pdf_path,
         start_page=start_page,
         end_page=end_page,
         bbox=main_bbox,
+        next_bbox=bboxRow
+    )
+
+    table_Row = extract_tables_from_bbox(
+        pdf_path,
+        start_page=page_Row,
+        end_page=end_page,
+        bbox=bboxRow,
         next_bbox=next_bbox
     )
 
 
-    return (tables or [])
+    return table_Column, table_Row
+
 
 
 def find_description_after_anchor(pdf_path, page_num, bbox):
@@ -695,7 +702,7 @@ def Search_variable_Lookup_Settings(pdf_path, variable_Lookup_Settings, variable
             print("Anchor not found.")
             return None
 
-        next_bbox, next_page = find_next_variable_anchor(pdf_path, "Types of Annuity Prop", page_num + 1, bbox)
+        next_bbox, next_page = find_next_variable_anchor(pdf_path, "Retirement rate", page_num + 1, bbox)
 
         # אם לא נמצא משתנה נוסף – נגדיר שהעמוד האחרון הוא הגבול
         with fitz.open(pdf_path) as doc:
@@ -760,7 +767,7 @@ def main():
     # נניח שאת רוצה את הראשון
     if files:
         pdf_path = os.path.join(base_path, files[0])  # בצורה הזו שם הקובץ אינדוודואל
-        search_variable_Input_Manager_in_pdf(pdf_path, "takeup_age")
+        search_variable_Input_Manager_in_pdf(pdf_path, "gtee_ppn")
 
 
 if __name__ == "__main__":
