@@ -190,13 +190,13 @@ def classify_lookup_tables(tables):
     return row_table, col_table
 
 
-def process_lookup_logic(pdf_path, excel_input_path, excel_output_path, description_value, tables):
+def process_lookup_logic(pdf_path, excel_input_path, excel_output_path, description_value, tables,input_variable=None):
     """
     🧩 פונקציה זו מממשת את לוגיקת העבודה המלאה על פי האפיון.
     היא משלבת בין טבלאות ה-Row וה-Column שנשלפו מה-PDF,
     ומבצעת חיפוש, השוואות, ושליפת ערכים מקבצי האקסל.
     """
-
+    print(f"🔍 Constant variable detected: {input_variable}")
     # ---------------------------------------------------------
     # שלב 1 – פתיחת הלשונית המתאימה לפי description_value
     # ---------------------------------------------------------
@@ -212,14 +212,8 @@ def process_lookup_logic(pdf_path, excel_input_path, excel_output_path, descript
     # ---------------------------------------------------------
     # שלב 2 – זיהוי טבלאות Row ו-Column
     # ---------------------------------------------------------
-    row_table, column_table = None, None
-    for t in tables:
-        header = [(h[0] if isinstance(h, list) else h).lower() for h in t[0]]
-        if any("row" in h for h in header):
-            row_table = pd.DataFrame(t[1:], columns=t[0])
-        elif any("column" in h for h in header):
-            column_table = pd.DataFrame(t[1:], columns=t[0])
-
+    # שלב 2 – זיהוי טבלאות Row ו-Column לפי הסדר
+    # ---------------------------------------------------------
     print("\n🔍 Debug: Checking extracted lookup tables:")
     for idx, tbl in enumerate(tables, start=1):
         if not tbl:
@@ -227,76 +221,116 @@ def process_lookup_logic(pdf_path, excel_input_path, excel_output_path, descript
         header = tbl[0]
         print(f"Table {idx} header: {header[:5]} ...")
 
-    # כאן בד"כ נעשית הסיווג של הטבלאות:
-    row_table, col_table = classify_lookup_tables(tables)
-
-    if column_table is None or row_table is None:
-        print("❌ Missing Row or Column table.")
+    if len(tables) < 2:
+        print("❌ Expected at least two tables (Column and Row).")
         return None
+
+    # הנחה: הטבלה הראשונה היא Column, השנייה היא Row
+    column_table_raw = tables[0]
+    row_table_raw = tables[1]
+
+    # Flatten nested lists if needed
+    if len(column_table_raw) == 1 and isinstance(column_table_raw[0], list):
+        column_table_raw = column_table_raw[0]
+    if len(row_table_raw) == 1 and isinstance(row_table_raw[0], list):
+        row_table_raw = row_table_raw[0]
+
+    try:
+        print("📄 Raw Column Table:", column_table_raw)
+        # אם יש רמה מיותרת ברשימה, נחלץ אותה
+
+        row_table = pd.DataFrame(row_table_raw[1:], columns=row_table_raw[0])
+        # יצירת DataFrame מהטבלה הראשונה
+        column_table = pd.DataFrame(column_table_raw[1:], columns=column_table_raw[0])
+
+        if row_table.empty:
+            print("❌ Row table is empty – cannot extract row lookup term.")
+            return None
+        print("📊 Debug: row_table table content:")
+        print(row_table)
+        print("📊 Debug: Column table content:")
+        print(column_table)
+
+        # בדיקה האם יש שורות בטבלה
+        if column_table.empty:
+            print("❌ Column table is empty – cannot extract lookup term.")
+            return None
+
+        # במקום לגשת ישירות עם loc[0]
+        try:
+            col_lookup_term = column_table.iloc[0]["Lookup term"]
+            print(f"✅ Lookup term from Column table: {col_lookup_term}")
+        except Exception as e:
+            print(f"❌ Failed to extract Lookup term from Column table: {e}")
+            return None
+
+    except Exception as e:
+        print(f"❌ Failed to convert tables to DataFrames: {e}")
+        return None
+
+    # נוודא שאינדקסים מתחילים מ-0 כדי למנוע KeyError
+    column_table.reset_index(drop=True, inplace=True)
+    row_table.reset_index(drop=True, inplace=True)
+
+    print(f"✅ Column table shape: {column_table.shape}")
+    print(f"✅ Row table shape: {row_table.shape}")
 
     # ---------------------------------------------------------
     # שלב 3 – קריאת טבלת Column (עמודה אחת בלבד)
     # ---------------------------------------------------------
+    print("\n📋 Debug: Columns in Column table:", list(column_table.columns))
+    print(column_table.head())
     print("🔹 Processing Column table")
-    col_lookup_term = column_table.loc[0, "Lookup term"]
-    col_target_column = column_table.loc[0, "Column"]
 
-    print(f"   Lookup term: {col_lookup_term}")
-    print(f"   Target column in Excel: {col_target_column}")
+    col_target_columns = column_table["Lookup term"].tolist()
+    col_target_rows = row_table["Lookup term"].tolist()
+
+    print("🔹 Lookup terms (Column table):", col_target_columns)
+    print("🔹 Lookup terms (Row table):", col_target_rows)
+
+    resolved_columns = []
+
+    print("🔹 Lookup terms (Column table):", col_target_columns)
+
+    for term in col_target_columns:
+        try:
+            resolved_value = resolve_lookup_term(pdf_path, excel_output_path, term, input_variable)
+            resolved_columns.append(resolved_value)
+        except Exception as e:
+            print(f"⚠️ Failed to resolve column term '{term}': {e}")
+            resolved_columns.append(None)
+
+    print("✅ Resolved column terms:",  resolved_columns)
 
     # ---------------------------------------------------------
     # שלב 4 – ריצה על טבלת Row כדי למצוא שורה מתאימה באקסל
     # ---------------------------------------------------------
-    print("🔹 Processing Row table")
-    row_terms = row_table["Lookup term"].tolist()
+    resolved_row_terms = []
+    for term in col_target_rows:
+        try:
+            resolved_term = resolve_lookup_term(pdf_path, excel_output_path, term, input_variable)
+            resolved_row_terms.append(resolved_term)
+        except Exception as e:
+            print(f"⚠️ Failed to resolve term '{term}': {e}")
+            resolved_row_terms.append(None)
 
-    matched_row_idx = None
-    start_col_idx = 0  # נתחיל מהעמודה הראשונה
+    print("✅ Extracted row terms:", resolved_row_terms)
 
-    for idx in range(len(df_input)):  # מעבר על שורות באקסל
-        match = True
-        current_col_idx = start_col_idx  # בכל שורה נתחיל מהעמודה הנוכחית
-        for term in row_terms:
-            try:
-                resolved_term = resolve_lookup_term(pdf_path, excel_output_path, term)
-            except Exception as e:
-                print(f"⚠️ Failed to resolve term '{term}': {e}")
-                resolved_term = None
 
-            # אם לא הצליח – דילוג לשורה הבאה בטבלת row וגם לעמודה הבאה באקסל
-            if not resolved_term or resolved_term == "":
-                print(f"➡️ Skipping row term '{term}' — unresolved value.")
-                match = False
-                start_col_idx += 1  # התקדמות לעמודה הבאה
-                break
-
-            if current_col_idx >= len(df_input.columns):
-                match = False
-                break
-
-            cell_value = str(df_input.iloc[idx, current_col_idx]).strip()
-            if str(cell_value).strip() != str(resolved_term).strip():
-                match = False
-                break
-            current_col_idx += 1  # התקדמות לעמודה הבאה
-
-        if match:
-            matched_row_idx = idx
-            print(f"✅ Found matching row at index {idx}")
-            break
-
-    if matched_row_idx is None:
-        print("⚠️ No matching row found in Excel.")
-        return None
 
     # ---------------------------------------------------------
     # שלב 5 – שליפת הערך מהעמודה שהתקבלה מטבלת Column
     # ---------------------------------------------------------
-    if col_target_column not in df_input.columns:
-        print(f"❌ Target column '{col_target_column}' not found in Excel sheet.")
+
+    if not resolved_columns or resolved_columns[0] is None:
+        print("❌ No resolved column term available.")
         return None
 
-    final_value = df_input.loc[matched_row_idx, col_target_column]
+    if resolved_columns[0] not in df_input.columns:
+        print(f"❌ Target column '{resolved_columns[0]}' not found in Excel sheet.")
+        return None
+
+    final_value = df_input.loc[matched_row_idx, resolved_columns[0]]
     print(f"🎯 Final extracted value: {final_value}")
     return final_value
 
@@ -304,18 +338,28 @@ def process_lookup_logic(pdf_path, excel_input_path, excel_output_path, descript
 # ---------------------------------------------------------
 # פונקציה פנימית – פירוש הערך שבעמודת Lookup term
 # ---------------------------------------------------------
-def resolve_lookup_term(pdf_path, excel_output_path, term):
+def resolve_lookup_term(pdf_path, excel_output_path, term, input_variable):
     """
     מבצעת פירוש של הערכים בעמודת Lookup term בהתאם לסוגם:
     Constant, Code Scalar, Input Variable וכו'.
     """
-    term = str(term).strip()
+    print(f"🔍 Constant variable detected: {input_variable}")
+
+
+    # ✳️ שלב ראשון — סינון לפני כל המרה או עיבוד
+    if not isinstance(term, str) or not any(
+        str(term).startswith(prefix) for prefix in ["Constant", "Code Scalar", "Input Variable"]
+    ):
+        print(f"⚠️ term לא רלוונטי או לא מחרוזת: {term}")
+        return term
+
+    # ✳️ רק עכשיו ננקה את המחרוזת
+    term = term.replace("\n", " ").strip()
+
 
     # 1️⃣ Constant: <*code_variable*>
     if term.startswith("Constant: <") and ">" in term:
-        variable_name = re.search(r"<(.*?)>", term).group(1)
-        print(f"🔍 Constant variable detected: {variable_name}")
-        return variable_name
+        return input_variable
 
     # 2️⃣ Constant: "some text"
     elif term.startswith('Constant: "'):
@@ -323,7 +367,13 @@ def resolve_lookup_term(pdf_path, excel_output_path, term):
         if match:
             text_value = match.group(1)
             print(f"🔍 Constant text detected: {text_value}")
-            return text_value
+            # 2️⃣ Constant: Assumption (ללא גרשיים)
+    elif re.match(r'Constant:\s*\S', term) and "<" not in term and ">" not in term:
+         text_value = re.sub(r'^Constant:\s*', '', term).strip()
+         print(f"🔍 Constant text (no quotes) detected: {text_value}")
+         return text_value
+
+
 
     # 3️⃣ Code Scalar: <variable> : <model>
     elif term.startswith("Code Scalar:"):
@@ -343,17 +393,18 @@ def resolve_lookup_term(pdf_path, excel_output_path, term):
 
     # 4️⃣ Input Variable: <namemodel>_Data: input variable
     elif term.startswith("Input Variable:"):
-        match = re.search(r"Input Variable:\s*<(.*?)>_Data: input variable", term)
-        if match:
-            model_name = match.group(1)
-            print(f"🔍 Input Variable detected: model={model_name}")
+        # חילוץ פרטים מהמחרוזת לפי מבנה: Input Variable: life_Data: life: paid_up
+        parts = term.split(":")
+        if len(parts) >= 4:
+            sheet_name = parts[1].strip()  # life_Data
+            model_name = parts[2].strip()  # life
+            variable_name = parts[3].strip()  # paid_up
 
-            variable_name = f"{model_name}_Data"
+            print(f"🔍 Input Variable detected: model={model_name}, variable={variable_name}")
+
             X = search_variable_Associated_Code_in_pdf(pdf_path, variable_name)
             if not X:
                 return None
-
-            sheet_name = f"{model_name}_Data"
             try:
                 df = pd.read_excel(excel_output_path, sheet_name=sheet_name)
                 found_row = df[df.iloc[:, 0] == X]
@@ -366,6 +417,7 @@ def resolve_lookup_term(pdf_path, excel_output_path, term):
 
     # ברירת מחדל – החזר כמו שהוא
     return term
+
 
 def find_anchor_with_fitz(pdf_path, variable_name, start_page=1):
     """
@@ -639,52 +691,31 @@ def extract_lookup_sections(pdf_path, start_page, end_page, main_bbox, next_bbox
     return table_Column, table_Row
 
 
-
-def find_description_after_anchor(pdf_path, page_num, bbox):
-    """
-    מחפשת את הטקסט שמופיע אחרי 'Description:' באותה שורה (או בקרבת מקום)
-    """
+def find_description_after_bbox(pdf_path, page_num, bbox):
     doc = fitz.open(pdf_path)
     page = doc[page_num]
     blocks = page.get_text("blocks")
 
+    start_y = bbox[1]  # נתחיל רק מהגובה של ה־bbox
     for (x0, y0, x1, y1, text, *_) in blocks:
-        if "Description:" in text:
-            # נחלץ את מה שאחרי המילה Description:
+        if y0 >= start_y and "Description:" in text:
             match = re.search(r"Description:\s*(.*)", text)
             if match:
                 return match.group(1).strip()
+            else:
+                desc_y = y0
+                # נחפש בלוקים באותו y
+                for (bx0, by0, bx1, by1, btext, *_) in blocks:
+                    if abs(by0 - desc_y) < 2 and bx0 > x1:
+                        return btext.strip()
     return None
 
 
-def extract_description_same_line(pdf_path, start_page):
-    """
-    מחפש את המחרוזת שמופיעה אחרי 'Description:' באותה שורה בלבד.
-    מחזיר את הטקסט שאחרי Description או None אם לא נמצא.
-    """
-
-    doc = fitz.open(pdf_path)
-    for page_num in range(start_page, len(doc)):
-        page = doc[page_num]
-        blocks = page.get_text("blocks")
-
-        for block in blocks:
-            text = block[4]
-            if "Description:" in text:
-                # נחפש את הטקסט שמופיע אחרי Description:
-                match = re.search(r"Description:\s*(.*)", text)
-                if match:
-                    return match.group(1).strip()
-                else:
-                    # לא נמצא טקסט אחרי הנקודותיים באותה שורה
-                    return None
-    return None
-
-
-def Search_variable_Lookup_Settings(pdf_path, variable_Lookup_Settings, variable_name=None, depth=0, max_depth=3):
+def Search_variable_Lookup_Settings(pdf_path, variable_Lookup_Settings, input_variable=None, depth=0, max_depth=3):
     """
     מוצא ומחלץ את טבלת ה־Lookup עבור משתנה מסוים.
     מבוסס על איתור מיקום 'Lookup Settings' בתוכן העניינים, ואז חיפוש ממוקד של המשתנה.
+
     """
     try:
         # שלב 1: איתור אזור "Lookup Settings" מתוך תוכן העניינים
@@ -702,7 +733,7 @@ def Search_variable_Lookup_Settings(pdf_path, variable_Lookup_Settings, variable
             print("Anchor not found.")
             return None
 
-        next_bbox, next_page = find_next_variable_anchor(pdf_path, "Retirement rate", page_num + 1, bbox)
+        next_bbox, next_page = find_next_variable_anchor(pdf_path, "Types of Annuity Prop", page_num + 1, bbox)
 
         # אם לא נמצא משתנה נוסף – נגדיר שהעמוד האחרון הוא הגבול
         with fitz.open(pdf_path) as doc:
@@ -730,7 +761,7 @@ def Search_variable_Lookup_Settings(pdf_path, variable_Lookup_Settings, variable
         # שלב 5: העמוד באקסל ממנו יחולץ ערך assumption
         print("Step 5:Description")
 
-        description_value = extract_description_same_line(pdf_path, start_page=page_num + 1)
+        description_value = find_description_after_bbox(pdf_path,page_num,bbox)
         print(f"📘 Description found: {description_value}")
 
         excel_input_path = r"C:\Users\user\Downloads\Main assumptions - variable - blank.xlsx"
@@ -740,7 +771,8 @@ def Search_variable_Lookup_Settings(pdf_path, variable_Lookup_Settings, variable
             excel_input_path,
             excel_output_path,
             description_value,
-            table_data
+            table_data,
+            input_variable
         )
         print(result_value)
 
@@ -767,7 +799,7 @@ def main():
     # נניח שאת רוצה את הראשון
     if files:
         pdf_path = os.path.join(base_path, files[0])  # בצורה הזו שם הקובץ אינדוודואל
-        search_variable_Input_Manager_in_pdf(pdf_path, "gtee_ppn")
+        search_variable_Input_Manager_in_pdf(pdf_path, "takeup_age")
 
 
 if __name__ == "__main__":
