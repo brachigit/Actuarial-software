@@ -189,6 +189,44 @@ def classify_lookup_tables(tables):
 
     return row_table, col_table
 
+def detect_header_by_reverse_scan(df):
+    """
+    מוצאת את שורת הכותרת כך:
+    1. מוצאים את השורה האחרונה שמלאה בנתונים.
+    2. עולים כלפי מעלה עד שמוצאים שורה ריקה.
+    3. השורה מתחת לשורה הריקה היא כותרת.
+    """
+
+    # פונקציה שמזהה האם שורה "מלאה" או "ריקה"
+    def is_row_empty(row):
+        # ריקה = כל התאים ריקים / NaN / *
+        for cell in row:
+            if isinstance(cell, str):
+                if cell.strip() not in ["", "*"]:  # * נחשב ריק אצלך
+                    return False
+            elif pd.notna(cell):
+                return False
+        return True
+
+    last_data_row = None
+
+    # שלב 1: מוצאים את השורה האחרונה המלאה בנתונים
+    for i in reversed(range(len(df))):
+        if not is_row_empty(df.iloc[i]):
+            last_data_row = i
+            break
+
+    if last_data_row is None:
+        return 0  # fallback
+
+    # שלב 2: עולים כלפי מעלה עד שפוגשים שורה ריקה
+    for r in reversed(range(0, last_data_row)):
+        if is_row_empty(df.iloc[r]):
+            # השורה שמתחתיה היא הכותרת
+            return r + 1
+
+    return 0  # fallback אם הכול מלא
+
 
 def process_lookup_logic(pdf_path, excel_input_path, excel_output_path, description_value, tables,input_variable=None):
     """
@@ -208,6 +246,15 @@ def process_lookup_logic(pdf_path, excel_input_path, excel_output_path, descript
 
     df_input = xl.parse(description_value)
     print(f"✅ Loaded sheet with {len(df_input)} rows and {len(df_input.columns)} columns")
+
+    header_row = detect_header_by_reverse_scan(df_input)
+    print(f"📌 Detected REAL header row at index: {header_row}")
+
+    # הגדרה מחדש של ה־header + reset index
+    df_input.columns = df_input.iloc[header_row]
+    df_input = df_input.iloc[header_row + 1:].reset_index(drop=True)
+
+    print(f"🔄 Sheet rebuilt using detected header row. New shape: {df_input.shape}")
 
     # ---------------------------------------------------------
     # שלב 2 – זיהוי טבלאות Row ו-Column
@@ -302,37 +349,76 @@ def process_lookup_logic(pdf_path, excel_input_path, excel_output_path, descript
 
     print("✅ Resolved column terms:",  resolved_columns)
 
-    # ---------------------------------------------------------
-    # שלב 4 – ריצה על טבלת Row כדי למצוא שורה מתאימה באקסל
-    # ---------------------------------------------------------
+    # יצירת רשימת תנאי השורה לאחר Resolve אמיתי
     resolved_row_terms = []
     for term in col_target_rows:
         try:
             resolved_term = resolve_lookup_term(pdf_path, excel_output_path, term, input_variable)
             resolved_row_terms.append(resolved_term)
         except Exception as e:
-            print(f"⚠️ Failed to resolve term '{term}': {e}")
+            print(f"⚠️ Failed to resolve row term '{term}': {e}")
             resolved_row_terms.append(None)
 
-    print("✅ Extracted row terms:", resolved_row_terms)
-
-
+    print("✅ Final resolved row terms:", resolved_row_terms)
 
     # ---------------------------------------------------------
-    # שלב 5 – שליפת הערך מהעמודה שהתקבלה מטבלת Column
+    # שלב 4 – חיפוש שורה מתאימה לפי resolved_row_terms
+    # ---------------------------------------------------------
+    matched_row_idx = None
+    start_col_idx = 0  # נתחיל מהעמודה הראשונה
+
+    for idx in range(len(df_input)):  # מעבר על שורות האקסל
+        match = True
+        current_col_idx = start_col_idx
+
+        for term in resolved_row_terms:
+            # אם הערך לא קיים – אין התאמה
+            if term is None or term == "":
+                match = False
+                start_col_idx += 1  # דילוג לעמודה הבאה
+                break
+
+            # בדיקה שלא יצאנו מגבול העמודות
+            if current_col_idx >= len(df_input.columns):
+                match = False
+                break
+
+            cell_value = str(df_input.iloc[idx, current_col_idx]).strip()
+            if str(cell_value) != str(term):
+                match = False
+                break
+
+            current_col_idx += 1  # התקדמות לעמודה הבאה
+
+        if match:
+            matched_row_idx = idx
+            print(f"✅ Found matching row at index {idx}")
+            break
+
+    if matched_row_idx is None:
+        print("❌ No matching row found after applying lookup logic.")
+        return None
+
+    # ---------------------------------------------------------
+    # שלב 5 – שליפת הערך לפי העמודה שנפתרה
     # ---------------------------------------------------------
 
-    if not resolved_columns or resolved_columns[0] is None:
-        print("❌ No resolved column term available.")
+    print("Columns in df_input:", list(df_input.columns))
+
+    target_column = resolved_columns[0]
+
+    if target_column not in df_input.columns:
+        print(f"❌ Column '{target_column}' not found in Excel sheet.")
         return None
 
-    if resolved_columns[0] not in df_input.columns:
-        print(f"❌ Target column '{resolved_columns[0]}' not found in Excel sheet.")
-        return None
-
-    final_value = df_input.loc[matched_row_idx, resolved_columns[0]]
+    final_value = df_input.loc[matched_row_idx, target_column]
     print(f"🎯 Final extracted value: {final_value}")
+
     return final_value
+
+
+
+
 
 
 # ---------------------------------------------------------
@@ -367,6 +453,7 @@ def resolve_lookup_term(pdf_path, excel_output_path, term, input_variable):
         if match:
             text_value = match.group(1)
             print(f"🔍 Constant text detected: {text_value}")
+            return text_value
             # 2️⃣ Constant: Assumption (ללא גרשיים)
     elif re.match(r'Constant:\s*\S', term) and "<" not in term and ">" not in term:
          text_value = re.sub(r'^Constant:\s*', '', term).strip()
